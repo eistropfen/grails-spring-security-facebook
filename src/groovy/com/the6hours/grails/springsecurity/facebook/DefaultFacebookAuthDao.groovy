@@ -3,7 +3,7 @@ package com.the6hours.grails.springsecurity.facebook
 import org.springframework.dao.OptimisticLockingFailureException
 import org.springframework.security.core.GrantedAuthority
 import org.springframework.security.core.authority.GrantedAuthorityImpl
-import org.codehaus.groovy.grails.plugins.springsecurity.SpringSecurityUtils
+import grails.plugin.springsecurity.SpringSecurityUtils
 import org.springframework.beans.factory.InitializingBean
 import org.springframework.context.ApplicationContextAware
 import org.springframework.context.ApplicationContext
@@ -13,7 +13,7 @@ import org.apache.log4j.Logger
 import org.springframework.security.core.userdetails.UserDetails
 import java.util.concurrent.TimeUnit
 
-import org.codehaus.groovy.grails.plugins.springsecurity.GormUserDetailsService
+import grails.plugin.springsecurity.userdetails.GormUserDetailsService
 
 /**
  * TODO
@@ -29,72 +29,85 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
     ApplicationContext applicationContext
     def coreUserDetailsService
 
+    @Deprecated
     String domainClassName
 
-    String appUserConnectionPropertyName
+    String appUserConnectionPropertyName = 'user'
 
+    @Deprecated
     String userDomainClassName
+
     String rolesPropertyName
+
     List<String> defaultRoleNames = ['ROLE_USER', 'ROLE_FACEBOOK']
 
     def facebookAuthService
+
+    @Deprecated
     DomainsRelation domainsRelation = null
 
     private Class<?> FacebookUserDomainClazz
     private Class<?> AppUserDomainClazz
 
-    Object getFacebookUser(Object user) {
-        if (facebookAuthService && facebookAuthService.respondsTo('getFacebookUser', user.class)) {
-            return facebookAuthService.getFacebookUser(user)
+    boolean isSameDomain() {
+        return FacebookUserDomainClazz == AppUserDomainClazz
+    }
+
+    Object getFacebookUser(Object appUser) {
+        if (facebookAuthService && appUser != null && facebookAuthService.respondsTo('getFacebookUser', appUser.class)) {
+            return facebookAuthService.getFacebookUser(appUser)
         }
-        if (domainsRelation == DomainsRelation.JoinedUser) {
-            def loaded = null
+        if (isSameDomain()) {
+            return appUser
+        } else {
+            Object loaded = null
             FacebookUserDomainClazz.withTransaction { status ->
-                user = FacebookUserDomainClazz.findWhere((appUserConnectionPropertyName): user)
+                loaded = FacebookUserDomainClazz.findWhere((appUserConnectionPropertyName): appUser)
             }
             return loaded
         }
-        if (domainsRelation == DomainsRelation.SameObject) {
-            return user
-        }
-        log.error("Invalid domainsRelation value: $domainsRelation")
-        return user
     }
 
     Object getAppUser(Object facebookUser) {
-        if (facebookAuthService && facebookAuthService.respondsTo('getAppUser', facebookUser.class)) {
+        if (facebookAuthService  && facebookUser != null && facebookAuthService.respondsTo('getAppUser', facebookUser.class)) {
             return facebookAuthService.getAppUser(facebookUser)
         }
         if (facebookUser == null) {
             log.warn("Passed facebookUser is null")
             return facebookUser
         }
-        if (domainsRelation == DomainsRelation.SameObject) {
+        if (isSameDomain()) {
             return facebookUser
-        }
-        if (domainsRelation == DomainsRelation.JoinedUser) {
+        } else {
             Object result = null
             FacebookUserDomainClazz.withTransaction { status ->
                 facebookUser.merge()
-                result = facebookUser.getAt(appUserConnectionPropertyName)
+                result = facebookUser.getProperty(appUserConnectionPropertyName)
             }
             return result
         }
-        log.error("Invalid domainsRelation value: $domainsRelation")
-        return facebookUser
     }
 
     Object findUser(long uid) {
         if (facebookAuthService && facebookAuthService.respondsTo('findUser', Long)) {
             return facebookAuthService.findUser(uid)
         }
-        def user = null
+        Object user = null
         FacebookUserDomainClazz.withTransaction { status ->
             user = FacebookUserDomainClazz.findWhere(uid: uid)
-            if (user
-                    && !(facebookAuthService && facebookAuthService.respondsTo('getFacebookUser', user.class))
-                    && domainsRelation == DomainsRelation.JoinedUser) {
-                getFacebookUser(user) // load the User object to memory prevent LazyInitializationException
+            if (user == null) {
+                return user
+            }
+            if (!isSameDomain()) {
+                if (appUserConnectionPropertyName != null && appUserConnectionPropertyName.length() > 0) {
+                    // load the User object to memory prevent LazyInitializationException
+                    Object appUser = user.getProperty(appUserConnectionPropertyName)
+                    if (appUser == null) {
+                        log.warn("No appUser for facebookUser ${user}. Property ${appUserConnectionPropertyName} have null value")
+                    }
+                } else {
+                    log.error("appUserConnectionPropertyName is not configured")
+                }
             }
         }
         return user
@@ -107,39 +120,41 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
 
         def securityConf = SpringSecurityUtils.securityConfig
 
-        def user = grailsApplication.getDomainClass(domainClassName).newInstance()
-        user.uid = token.uid
-        if (user.properties.containsKey('accessToken')) {
-            user.accessToken = token.accessToken?.accessToken
+        def user = grailsApplication.getDomainClass(FacebookUserDomainClazz.canonicalName).newInstance()
+        user.setProperty('uid', token.uid)
+        if (user.hasProperty('accessToken')) {
+            user.setProperty('accessToken', token.accessToken?.accessToken)
         }
-        if (user.properties.containsKey('accessTokenExpires')) {
-            user.accessTokenExpires = token.accessToken?.expireAt
+        if (user.hasProperty('accessTokenExpires')) {
+            user.setProperty('accessTokenExpires', token.accessToken?.expireAt)
         }
 
         def appUser
-        if (domainsRelation == DomainsRelation.JoinedUser) {
+        if (!isSameDomain()) {
             if (facebookAuthService && facebookAuthService.respondsTo('createAppUser', FacebookUserDomainClazz, FacebookAuthToken)) {
                 appUser = facebookAuthService.createAppUser(user, token)
             } else {
-                appUser = AppUserDomainClazz.newInstance()
+                appUser = grailsApplication.getDomainClass(AppUserDomainClazz.canonicalName).newInstance()
                 if (facebookAuthService && facebookAuthService.respondsTo('prepopulateAppUser', AppUserDomainClazz, FacebookAuthToken)) {
                     facebookAuthService.prepopulateAppUser(appUser, token)
                 } else {
-                    appUser[securityConf.userLookup.usernamePropertyName] = "facebook_$token.uid"
-                    appUser[securityConf.userLookup.passwordPropertyName] = token.accessToken?.accessToken
-                    appUser[securityConf.userLookup.enabledPropertyName] = true
-                    appUser[securityConf.userLookup.accountExpiredPropertyName] = false
-                    appUser[securityConf.userLookup.accountLockedPropertyName] = false
-                    appUser[securityConf.userLookup.passwordExpiredPropertyName] = false
+                    appUser.setProperty(securityConf.userLookup.usernamePropertyName, "facebook_$token.uid")
+                    appUser.setProperty(securityConf.userLookup.passwordPropertyName, token.accessToken?.accessToken)
+                    appUser.setProperty(securityConf.userLookup.enabledPropertyName, true)
+                    appUser.setProperty(securityConf.userLookup.accountExpiredPropertyName, false)
+                    appUser.setProperty(securityConf.userLookup.accountLockedPropertyName, false)
+                    appUser.setProperty(securityConf.userLookup.passwordExpiredPropertyName, false)
                 }
                 AppUserDomainClazz.withTransaction {
                     appUser.save(flush: true, failOnError: true)
                 }
             }
             user[appUserConnectionPropertyName] = appUser
+        } else {
+            appUser = user
         }
 
-        if (facebookAuthService && facebookAuthService.respondsTo('onCreate', FacebookUserDomainClazz, token)) {
+        if (facebookAuthService && facebookAuthService.respondsTo('onCreate', FacebookUserDomainClazz, FacebookAuthToken)) {
             facebookAuthService.onCreate(user, token)
         }
 
@@ -147,18 +162,19 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
             user.save(flush: true, failOnError: true)
         }
 
-        if (facebookAuthService && facebookAuthService.respondsTo('afterCreate', FacebookUserDomainClazz, token)) {
+        if (facebookAuthService && facebookAuthService.respondsTo('afterCreate', FacebookUserDomainClazz, FacebookAuthToken)) {
             facebookAuthService.afterCreate(user, token)
         }
 
         if (facebookAuthService && facebookAuthService.respondsTo('createRoles', FacebookUserDomainClazz)) {
             facebookAuthService.createRoles(user)
         } else {
-            Class<?> PersonRole = grailsApplication.getDomainClass(securityConf.userLookup.authorityJoinClassName).clazz
-            Class<?> Authority = grailsApplication.getDomainClass(securityConf.authority.className).clazz
+            Class<?> PersonRole = grailsApplication.getDomainClass(securityConf.userLookup.authorityJoinClassName)?.clazz
+            Class<?> Authority = grailsApplication.getDomainClass(securityConf.authority.className)?.clazz
+            String authorityNameField = securityConf.authority.nameField
+            String findByField = authorityNameField[0].toUpperCase() + authorityNameField.substring(1)
             PersonRole.withTransaction { status ->
                 defaultRoleNames.each { String roleName ->
-                    String findByField = securityConf.authority.nameField[0].toUpperCase() + securityConf.authority.nameField.substring(1)
                     def auth = Authority."findBy${findByField}"(roleName)
                     if (auth) {
                         PersonRole.create(appUser, auth)
@@ -174,7 +190,7 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
     }
 
     Object getPrincipal(Object user) {
-        if (facebookAuthService && facebookAuthService.respondsTo('getPrincipal', user.class)) {
+        if (facebookAuthService && user != null && facebookAuthService.respondsTo('getPrincipal', user.class)) {
             return facebookAuthService.getPrincipal(user)
         }
         if (coreUserDetailsService) {
@@ -184,8 +200,12 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
     }
 
     Collection<GrantedAuthority> getRoles(Object user) {
-        if (facebookAuthService && facebookAuthService.respondsTo('getRoles', user.class)) {
+        if (facebookAuthService && user != null && facebookAuthService.respondsTo('getRoles', user.class)) {
             return facebookAuthService.getRoles(user)
+        }
+
+        if (user == null) {
+            return []
         }
 
         if (UserDetails.isAssignableFrom(user.class)) {
@@ -200,7 +220,7 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
         }
         Collection roles = []
         PersonRole.withTransaction { status ->
-            roles = user?.getAt(rolesPropertyName)
+            roles = user?.getProperty(rolesPropertyName)
         }
         if (!roles) {
             roles = []
@@ -212,26 +232,26 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
             if (it instanceof String) {
                 return new GrantedAuthorityImpl(it.toString())
             } else {
-                new GrantedAuthorityImpl(it[conf.authority.nameField])
+                new GrantedAuthorityImpl(it.getProperty(conf.authority.nameField))
             }
         }
     }
 
     Boolean hasValidToken(Object facebookUser) {
-        if (facebookAuthService && facebookAuthService.respondsTo('hasValidToken', facebookUser.class)) {
+        if (facebookAuthService && facebookUser != null && facebookAuthService.respondsTo('hasValidToken', facebookUser.class)) {
             return facebookAuthService.hasValidToken(facebookUser)
         }
-        if (facebookUser.properties.containsKey('accessToken')) {
-            if (facebookUser.accessToken == null) {
+        if (facebookUser.hasProperty('accessToken')) {
+            if (facebookUser.getProperty('accessToken') == null) {
                 return false
             }
         }
-        if (facebookUser.properties.containsKey('accessTokenExpires')) {
-            if (facebookUser.accessTokenExpires == null) {
+        if (facebookUser.hasProperty('accessTokenExpires')) {
+            if (facebookUser.getProperty('accessTokenExpires') == null) {
                 return false
             }
             Date goodExpiration = new Date(System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(15))
-            Date currentExpires = facebookUser.accessTokenExpires
+            Date currentExpires = facebookUser.getProperty('accessTokenExpires')
             if (currentExpires.before(goodExpiration)) {
                 return false
             }
@@ -242,23 +262,45 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
     }
 
     void updateToken(Object facebookUser, FacebookAuthToken token) {
-        if (facebookAuthService && facebookAuthService.respondsTo('updateToken', facebookUser.class, token.class)) {
+        if (facebookAuthService && facebookUser != null && facebookAuthService.respondsTo('updateToken', facebookUser.class, FacebookAuthToken)) {
             facebookAuthService.updateToken(facebookUser, token)
             return
+        }
+        if (token.accessToken == null) {
+            log.error("No access token $token")
+            return
+        }
+        if (token.accessToken.accessToken == null) {
+            log.warn("Update to empty accessToken for user $facebookUser")
         }
         log.debug("Update access token to $token.accessToken for $facebookUser")
         FacebookUserDomainClazz.withTransaction {
             try {
+                boolean updated = false
                 if (!facebookUser.isAttached()) {
                     facebookUser.attach()
                 }
-                if (facebookUser.properties.containsKey('accessToken')) {
-                    facebookUser.accessToken = token.accessToken?.accessToken
+                if (facebookUser.hasProperty('accessToken')) {
+                    if (facebookUser.getProperty('accessToken') != token.accessToken.accessToken) {
+                        updated = true
+                        facebookUser.setProperty('accessToken', token.accessToken.accessToken)
+                    }
                 }
-                if (facebookUser.properties.containsKey('accessTokenExpires')) {
-                    facebookUser.accessTokenExpires = token.accessToken?.expireAt
+                if (updated && facebookUser.hasProperty('accessTokenExpires')) {
+                    if (!equalDates(facebookUser.getProperty('accessTokenExpires'), token.accessToken.expireAt)) {
+                        if (token.accessToken.expireAt != null || token.accessToken.accessToken == null) { //allow null only if both expireAt and accessToken are null
+                            updated = true
+                            facebookUser.setProperty('accessTokenExpires', token.accessToken.expireAt)
+                        } else {
+                            log.warn("Provided accessToken.expiresAt value is null. Skip update")
+                        }
+                    } else {
+                        log.warn("A new accessToken have same token but different expires: $token")
+                    }
                 }
-                facebookUser.save()
+                if (updated) {
+                    facebookUser.save()
+                }
             } catch (OptimisticLockingFailureException e) {
                 log.warn("Seems that token was updated in another thread (${e.message}). Skip")
             } catch (Throwable e) {
@@ -267,13 +309,33 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
         }
     }
 
+    boolean equalDates(Object x, Object y) {
+        long xtime = dateToLong(x)
+        long ytime = dateToLong(y)
+        return xtime >= 0 && ytime >= 0 && Math.abs(xtime - ytime) < 1000 //for dates w/o millisecond
+    }
+
+    long dateToLong(Object date) {
+        if (date == null) {
+            return -1
+        }
+        if (date instanceof Date) { //java.sql.Timestamp extends Date
+            return date.time
+        }
+        if (date instanceof Number) {
+            return date.toLong()
+        }
+        log.warn("Cannot convert date: $date (class: ${date.class})")
+        return -1
+    }
+
     String getAccessToken(Object facebookUser) {
-        if (facebookAuthService && facebookAuthService.respondsTo('getAccessToken', facebookUser.class)) {
+        if (facebookAuthService && facebookUser != null && facebookAuthService.respondsTo('getAccessToken', facebookUser.class)) {
             return facebookAuthService.getAccessToken(facebookUser)
         }
-        if (facebookUser.properties.containsKey('accessToken')) {
-            if (facebookUser.properties.containsKey('accessTokenExpires')) {
-                Date currentExpires = facebookUser.accessTokenExpires
+        if (facebookUser.hasProperty('accessToken')) {
+            if (facebookUser.hasProperty('accessTokenExpires')) {
+                Date currentExpires = facebookUser.getProperty('accessTokenExpires')
                 if (currentExpires == null) {
                     log.debug("Current access token don't have expiration timeout, and should be updated")
                     return null
@@ -283,7 +345,7 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
                     return null
                 }
             }
-            return facebookUser.accessToken
+            return facebookUser.getProperty('accessToken')
         }
         return null
     }
@@ -301,7 +363,7 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
         List serviceMethods = []
         if (facebookAuthService) {
             facebookAuthService.metaClass.methods.each {
-                serviceMethods<< it.name
+                serviceMethods << it.name
             }
         }
 
@@ -328,9 +390,11 @@ class DefaultFacebookAuthDao implements FacebookAuthDao<Object, Object>, Initial
         }
 
         if (coreUserDetailsService != null) {
-            if (!(coreUserDetailsService instanceof GormUserDetailsService && coreUserDetailsService.respondsTo('createUserDetails'))) {
-                log.warn("UserDetailsService from spring-security-core don't have method 'createUserDetails()'")
+            if (!(coreUserDetailsService.respondsTo('createUserDetails'))) {
+                log.error("UserDetailsService from spring-security-core don't have method 'createUserDetails()'")
                 coreUserDetailsService = null
+            } else if (!(coreUserDetailsService instanceof GormUserDetailsService)) {
+                log.warn("UserDetailsService from spring-security-core isn't instance of GormUserDetailsService, but: ${coreUserDetailsService.class}")
             }
         } else {
             log.warn("No UserDetailsService bean from spring-security-core")

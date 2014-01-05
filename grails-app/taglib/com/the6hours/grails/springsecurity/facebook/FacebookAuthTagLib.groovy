@@ -1,8 +1,8 @@
 package com.the6hours.grails.springsecurity.facebook
 
-import org.codehaus.groovy.grails.plugins.springsecurity.SpringSecurityUtils
+import grails.plugin.springsecurity.SpringSecurityUtils
 import org.codehaus.groovy.grails.web.mapping.LinkGenerator
-import grails.plugins.springsecurity.SpringSecurityService
+import grails.plugin.springsecurity.SpringSecurityService
 
 /**
  * TODO
@@ -43,6 +43,11 @@ class FacebookAuthTagLib {
 
         if (!init || attrs.force == 'true') {
             String lang = conf.taglib.language
+            if (attrs.lang?.length > 0) {
+                lang = attrs.lang
+            } else if (attrs.language?.length > 0) {
+                lang = attrs.language
+            }
             def appId = conf.appId
             out << '<div id="fb-root"></div>\n'
 
