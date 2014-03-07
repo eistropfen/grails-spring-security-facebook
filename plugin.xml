@@ -1,4 +1,4 @@
-<plugin name='spring-security-facebook' version='0.13.2' grailsVersion='2.3.4 &gt; *'>
+<plugin name='spring-security-facebook' version='0.13.2' grailsVersion='2.3.6 &gt; *'>
   <author>Igor Artamonov</author>
   <authorEmail>igor@artamonov.ru</authorEmail>
   <title>Facebook Authentication</title>
